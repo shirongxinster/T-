@@ -28,6 +28,130 @@ REBAR_LEGEND_FILE = os.path.join(LEGENDS_DIR, '钢筋锈蚀或可见箍筋轮廓
 PEEL_OFF_GEOMETRY = None
 REBAR_GEOMETRY = None
 
+# 标注位置缓存（每页重置）
+LABEL_POSITIONS_CACHE = []  # 存储 (x1, y1, x2, y2) 的标注边界框
+
+# T梁标注范围限制
+BEAM_BOUNDS = {
+    'upper': {'min_x': 84, 'max_x': 483, 'min_y': 228, 'max_y': 289},
+    'lower': {'min_x': 84, 'max_x': 483, 'min_y': 117, 'max_y': 177}
+}
+
+# 各部件标注方向配置
+PART_LABEL_DIRECTION = {
+    'upper': {
+        '左翼缘板': {'angle': -45, 'flip_angle': 135},  # 向下45度，翻转135度
+        '右翼缘板': {'angle': 45, 'flip_angle': 135},   # 向上45度，翻转135度
+        '左腹板': {'angle': -45, 'flip_angle': 135},    # 向下45度，翻转135度
+        '右腹板': {'angle': 45, 'flip_angle': 135},     # 向上45度，翻转135度
+        '马蹄左侧面': {'angle': 45, 'flip_angle': 135},  # 向上45度，翻转135度
+        '马蹄右侧面': {'angle': -45, 'flip_angle': 135}, # 向下45度，翻转135度
+    },
+    'lower': {
+        '左翼缘板': {'angle': -45, 'flip_angle': 135},
+        '右翼缘板': {'angle': 45, 'flip_angle': 135},
+        '左腹板': {'angle': -45, 'flip_angle': 135},
+        '右腹板': {'angle': 45, 'flip_angle': 135},
+        '马蹄左侧面': {'angle': 45, 'flip_angle': 135},
+        '马蹄右侧面': {'angle': -45, 'flip_angle': 135},
+    }
+}
+
+def reset_label_cache():
+    """重置标注位置缓存（每页开始时调用）"""
+    global LABEL_POSITIONS_CACHE
+    LABEL_POSITIONS_CACHE = []
+
+def get_label_bbox(start_x, start_y, angle, seg1_len, seg2_len):
+    """计算标注的边界框
+    
+    Args:
+        start_x, start_y: 引线起点
+        angle: 第一段角度（度）
+        seg1_len: 第一段长度
+        seg2_len: 第二段长度（水平）
+    
+    Returns:
+        (min_x, min_y, max_x, max_y)
+    """
+    angle_rad = math.radians(angle)
+    
+    # 折点位置
+    bend_x = start_x + seg1_len * math.cos(angle_rad)
+    bend_y = start_y + seg1_len * math.sin(angle_rad)
+    
+    # 终点位置（第二段水平）
+    end_x = bend_x + seg2_len
+    end_y = bend_y
+    
+    # 计算边界框（包含文字区域）
+    all_x = [start_x, bend_x, end_x]
+    all_y = [start_y, bend_y, end_y]
+    
+    # 文字区域（在终点附近，高度约5）
+    text_margin = 2
+    all_x.extend([end_x - text_margin, end_x + seg2_len + text_margin])
+    all_y.extend([end_y - 5, end_y + 5])
+    
+    return (min(all_x), min(all_y), max(all_x), max(all_y))
+
+def check_bbox_overlap(bbox1, bbox2, margin=2):
+    """检查两个边界框是否重叠（带边距）"""
+    x1_min, y1_min, x1_max, y1_max = bbox1
+    x2_min, y2_min, x2_max, y2_max = bbox2
+    
+    # 添加边距
+    x1_min -= margin
+    y1_min -= margin
+    x1_max += margin
+    y1_max += margin
+    
+    return not (x1_max <= x2_min or x1_min >= x2_max or y1_max <= y2_min or y1_min >= y2_max)
+
+def check_in_bounds(bbox, beam_level):
+    """检查边界框是否在T梁范围内"""
+    bounds = BEAM_BOUNDS.get(beam_level, BEAM_BOUNDS['upper'])
+    x_min, y_min, x_max, y_max = bbox
+    
+    return (x_min >= bounds['min_x'] and x_max <= bounds['max_x'] and
+            y_min >= bounds['min_y'] and y_max <= bounds['max_y'])
+
+def find_non_overlapping_position(start_x, start_y, base_angle, flip_angle, seg1_len, seg2_len, 
+                                   beam_level, max_attempts=10):
+    """寻找不重叠的标注位置
+    
+    Returns:
+        (angle, bbox) - 使用的角度和边界框，如果找不到则返回None
+    """
+    global LABEL_POSITIONS_CACHE
+    
+    # 尝试的角度列表：先基础角度，再翻转角度，再尝试偏移
+    angles_to_try = [base_angle, flip_angle]
+    
+    # 添加一些偏移角度
+    for offset in [10, -10, 20, -20, 30, -30]:
+        angles_to_try.append(base_angle + offset)
+        angles_to_try.append(flip_angle + offset)
+    
+    for angle in angles_to_try[:max_attempts]:
+        bbox = get_label_bbox(start_x, start_y, angle, seg1_len, seg2_len)
+        
+        # 检查是否在范围内
+        if not check_in_bounds(bbox, beam_level):
+            continue
+        
+        # 检查是否与已有标注重叠
+        overlap = False
+        for existing_bbox in LABEL_POSITIONS_CACHE:
+            if check_bbox_overlap(bbox, existing_bbox):
+                overlap = True
+                break
+        
+        if not overlap:
+            return (angle, bbox)
+    
+    return None
+
 def load_peel_off_geometry():
     """从剥落图例模板加载原始几何数据"""
     global PEEL_OFF_GEOMETRY
@@ -127,25 +251,25 @@ def load_rebar_geometry():
     return REBAR_GEOMETRY
 
 
-# 各部件原点坐标（模板坐标系）
+# 各部件原点坐标（模板坐标系）- 2026-03-23 更新
 BEAM_ORIGINS = {
-    'upper': {  # 上方T梁
-        '梁底': (83.8, 274),
-        '左翼缘板': (83.8, 262.3),
-        '右翼缘板': (83.8, 256.5),
-        '左腹板': (83.8, 262.3),
-        '右腹板': (83.8, 256.5),
-        '马蹄左侧面': (83.8, 244),  # 估计值
+    'upper': {  # 上方T梁（1-1号，奇数梁）
+        '梁底': (84, 262),        # Y方向: 从上到下
+        '左翼缘板': (84, 284.4),  # Y方向: 从下到上
+        '右翼缘板': (84, 234.4),  # Y方向: 从上到下
+        '左腹板': (84, 284.4),    # Y方向: 从上到下
+        '右腹板': (84, 234.4),    # Y方向: 从下到上
+        '马蹄左侧面': (84, 266),  # 只有X坐标，从左到右
+        '马蹄右侧面': (84, 253),  # 只有X坐标，从左到右
     },
-    'lower': {  # 下方T梁
-        '梁底': (83.8, 160),
-        '左翼缘板': (83.8, 150),
-        '右翼缘板': (83.8, 144.2),
-        '左腹板': (83.8, 150),
-        '右腹板': (83.8, 144.2),
-        '马蹄左侧面': (83.8, 132),  # 估计值
-        '右侧齿块': (83.8, 144.2),  # 与右翼缘板共用
-        '左侧齿块': (83.8, 150),  # 与左翼缘板共用
+    'lower': {  # 下方T梁（1-2号，偶数梁）
+        '梁底': (83.8, 150),      # Y方向: 从上到下
+        '左翼缘板': (83.8, 172),  # Y方向: 从下到上
+        '右翼缘板': (83.8, 122),  # Y方向: 从上到下
+        '左腹板': (83.8, 172),    # Y方向: 从上到下
+        '右腹板': (83.8, 122),    # Y方向: 从下到上
+        '马蹄左侧面': (84, 153),    # 只有X坐标，从左到右
+        '马蹄右侧面': (84, 141),    # 只有X坐标，从左到右
     }
 }
 
@@ -155,31 +279,58 @@ def get_part_origin(part_type: str, specific_part: str) -> tuple:
     return origins.get(specific_part, origins['梁底'])
 
 
-def is_left_side_part(specific_part: str) -> bool:
-    """判断是否为T梁的左面（上方）部件
+# 各部件Y方向定义（从上到下 = Y值减小，从下到上 = Y值增大）
+PART_Y_DIRECTION = {
+    # 上方T梁（1-1号）
+    'upper': {
+        '梁底': '从上到下',      # Y值减小
+        '左翼缘板': '从下到上',  # Y值增大
+        '右翼缘板': '从上到下',  # Y值减小
+        '左腹板': '从上到下',    # Y值减小
+        '右腹板': '从下到上',    # Y值增大
+        '马蹄左侧面': '从左到右',  # 只有X方向
+        '马蹄右侧面': '从左到右',  # 只有X方向
+    },
+    # 下方T梁（1-2号）
+    'lower': {
+        '梁底': '从上到下',      # Y值减小
+        '左翼缘板': '从下到上',  # Y值增大
+        '右翼缘板': '从上到下',  # Y值减小
+        '左腹板': '从上到下',    # Y值减小
+        '右腹板': '从下到上',    # Y值增大
+        '马蹄左侧面': '从左到右',  # 只有X方向
+        '马蹄右侧面': '从左到右',  # 只有X方向
+    }
+}
 
-    T梁坐标系：左面 = 上方部分，右面 = 下方部分
-    """
-    left_parts = ['左翼缘板', '左腹板', '马蹄左侧面']
-    return any(part in specific_part for part in left_parts)
 
-
-def convert_to_cad_coords(x: float, y: float, origin: tuple, specific_part: str = '') -> tuple:
+def convert_to_cad_coords(x: float, y: float, origin: tuple, specific_part: str = '', beam_level: str = 'upper') -> tuple:
     """将病害坐标转换为CAD坐标
 
-    T梁坐标系：
-    - 左面（左翼缘板、左腹板等）→ 上方 → y越大，CAD Y越大
-    - 右面（右翼缘板、右腹板等）→ 下方 → y越大，CAD Y越小
+    Args:
+        x: 病害x坐标（米）
+        y: 病害y坐标（米）
+        origin: 部件原点CAD坐标
+        specific_part: 具体部件名称
+        beam_level: 'upper'（上方T梁/奇数梁）或 'lower'（下方T梁/偶数梁）
+
+    Returns:
+        (cad_x, cad_y)
     """
     origin_x, origin_y = origin
+    # X方向：统一从左到右
     cad_x = origin_x + x * 10
 
-    # 根据部件决定Y轴方向
-    if is_left_side_part(specific_part):
-        # 左面部件：Y轴正向指向上方
+    # Y方向：根据部件和T梁位置决定
+    direction = PART_Y_DIRECTION.get(beam_level, {}).get(specific_part, '从上到下')
+    if direction == '从左到右':
+        # 马蹄左侧面/右侧面：只有X方向，Y坐标固定为原点Y
+        cad_y = origin_y
+    elif direction == '从下到上':
+        # 从下到上：y越大，CAD Y越大（原点是最下方）
         cad_y = origin_y + y * 10
     else:
-        # 右面部件：Y轴负向指向下方（原逻辑）
+        # 从上到下：y越大，CAD Y越小（原点是最上方）
         cad_y = origin_y - y * 10
 
     return (cad_x, cad_y)
@@ -294,26 +445,27 @@ def update_text_in_msp(msp, old_text: str, new_text: str, height: float = None, 
                             entity.text = '{\\B;' + content + '}'
 
 
-def draw_polyline_leader(msp, start_x: float, start_y: float, seg2_len: float, go_left: bool = False):
+def draw_polyline_leader(msp, start_x: float, start_y: float, seg2_len: float, 
+                         angle: float = 45, go_left: bool = False):
     """绘制折线引线
 
     Args:
-        go_left: 如果为True，第二段向左画（seg2_len为负）
+        seg2_len: 第二段水平长度
+        angle: 第一段角度（度），正数向上，负数向下
+        go_left: 如果为True，第二段向左画
     """
     seg1_len = 8
-    angle = math.radians(45)
+    angle_rad = math.radians(angle)
 
+    # 计算折点位置
+    bend_x = start_x + seg1_len * math.cos(angle_rad)
+    bend_y = start_y + seg1_len * math.sin(angle_rad)
+    
+    # 第二段水平方向
     if go_left:
-        # 向左画：折线第一段向左上45度，第二段向左
-        bend_x = start_x - seg1_len * math.cos(angle)  # 向左
-        bend_y = start_y + seg1_len * math.sin(angle)  # 向上
-        end_x = bend_x - abs(seg2_len)  # 继续向左
+        end_x = bend_x - abs(seg2_len)
     else:
-        # 向右画（默认）：折线第一段向右下45度，第二段向右
-        bend_x = start_x + seg1_len * math.cos(angle)
-        bend_y = start_y + seg1_len * math.sin(angle)
         end_x = bend_x + abs(seg2_len)
-
     end_y = bend_y
 
     points = [(start_x, start_y), (bend_x, bend_y), (end_x, end_y)]
@@ -322,22 +474,24 @@ def draw_polyline_leader(msp, start_x: float, start_y: float, seg2_len: float, g
     return (bend_x, bend_y, end_x, end_y)
 
 
-def draw_disease_label(msp, disease_type: str, value_text: str, start_x: float, start_y: float, seg2_len: float, go_left: bool = False):
-    """绘制病害标注
+def draw_disease_label_with_angle(msp, disease_type: str, value_text: str, start_x: float, start_y: float, 
+                                   seg2_len: float, angle: float = 45, go_left: bool = False):
+    """绘制病害标注（支持指定角度）
 
     Args:
-        go_left: 如果为True，标注向左画（文字在左侧）
+        angle: 第一段角度（度），正数向上，负数向下
+        go_left: 如果为True，第二段向左画
     """
     text_height = 2.5
 
-    bend_x, bend_y, end_x, end_y = draw_polyline_leader(msp, start_x, start_y, seg2_len, go_left)
+    bend_x, bend_y, end_x, end_y = draw_polyline_leader(msp, start_x, start_y, seg2_len, angle, go_left)
 
     if go_left:
-        # 向左画：文字在折点的左侧
-        text_x = bend_x - seg2_len - 1  # 文字起始位置向左偏移
+        # 向左画：文字在终点的左侧
+        text_x = end_x - seg2_len * 0.5
     else:
-        # 向右画：文字在折点的右侧
-        text_x = bend_x + 1
+        # 向右画：文字在终点的右侧
+        text_x = end_x - seg2_len * 0.5
 
     msp.add_text(
         disease_type,
@@ -357,12 +511,14 @@ def draw_disease_label(msp, disease_type: str, value_text: str, start_x: float, 
                 'color': 7
             }
         )
+    
+    return (bend_x, bend_y, end_x, end_y)
 
 
-def draw_crack(msp, x_start: float, x_end: float, y: float, origin: tuple, specific_part: str = ''):
+def draw_crack(msp, x_start: float, x_end: float, y: float, origin: tuple, specific_part: str = '', beam_level: str = 'upper'):
     """绘制单条裂缝（手绘风格）"""
-    cad_x1, cad_y1 = convert_to_cad_coords(x_start, y, origin, specific_part)
-    cad_x2, cad_y2 = convert_to_cad_coords(x_end, y, origin, specific_part)
+    cad_x1, cad_y1 = convert_to_cad_coords(x_start, y, origin, specific_part, beam_level)
+    cad_x2, cad_y2 = convert_to_cad_coords(x_end, y, origin, specific_part, beam_level)
 
     points = []
     x = cad_x1
@@ -376,10 +532,10 @@ def draw_crack(msp, x_start: float, x_end: float, y: float, origin: tuple, speci
     msp.add_lwpolyline(points=points, dxfattribs={'color': 7})
 
 
-def draw_crack_group(msp, x_start: float, x_end: float, count: int, origin: tuple, specific_part: str = ''):
+def draw_crack_group(msp, x_start: float, x_end: float, count: int, origin: tuple, specific_part: str = '', beam_level: str = 'upper'):
     """绘制裂缝群"""
-    cad_x1, cad_y1 = convert_to_cad_coords(x_start, 0, origin, specific_part)
-    cad_x2, cad_y2 = convert_to_cad_coords(x_end, 0, origin, specific_part)
+    cad_x1, cad_y1 = convert_to_cad_coords(x_start, 0, origin, specific_part, beam_level)
+    cad_x2, cad_y2 = convert_to_cad_coords(x_end, 0, origin, specific_part, beam_level)
 
     for i in range(count):
         y_offset = i * 1.0 + 0.5
@@ -396,10 +552,10 @@ def draw_crack_group(msp, x_start: float, x_end: float, count: int, origin: tupl
         msp.add_lwpolyline(points=points, dxfattribs={'color': 7})
 
 
-def draw_mesh_crack(msp, x1: float, y1: float, x2: float, y2: float, origin: tuple, specific_part: str = ''):
+def draw_mesh_crack(msp, x1: float, y1: float, x2: float, y2: float, origin: tuple, specific_part: str = '', beam_level: str = 'upper'):
     """绘制网状裂缝（波浪线填充）"""
-    cad_x1, cad_y1 = convert_to_cad_coords(x1, y1, origin, specific_part)
-    cad_x2, cad_y2 = convert_to_cad_coords(x2, y2, origin, specific_part)
+    cad_x1, cad_y1 = convert_to_cad_coords(x1, y1, origin, specific_part, beam_level)
+    cad_x2, cad_y2 = convert_to_cad_coords(x2, y2, origin, specific_part, beam_level)
 
     # 确保 cad_x1 < cad_x2
     if cad_x1 > cad_x2:
@@ -429,10 +585,10 @@ def draw_mesh_crack(msp, x1: float, y1: float, x2: float, y2: float, origin: tup
         msp.add_lwpolyline(points=points, dxfattribs={'color': 7})
 
 
-def draw_peel_off_with_rebar(msp, x1: float, y1: float, x2: float, y2: float, origin: tuple, specific_part: str = ''):
+def draw_peel_off_with_rebar(msp, x1: float, y1: float, x2: float, y2: float, origin: tuple, specific_part: str = '', beam_level: str = 'upper'):
     """绘制剥落露筋 = 剥落不规则图形 + 叠加红色虚线交叉格栅"""
     # 第一步：先画剥落的不规则图形，同时获取实际绘制范围
-    actual_bbox = draw_peel_off(msp, x1, y1, x2, y2, origin, specific_part, return_bbox=True)
+    actual_bbox = draw_peel_off(msp, x1, y1, x2, y2, origin, specific_part, beam_level, return_bbox=True)
 
     if actual_bbox is None:
         return
@@ -457,14 +613,14 @@ def draw_peel_off_with_rebar(msp, x1: float, y1: float, x2: float, y2: float, or
         )
 
 
-def draw_peel_off(msp, x1: float, y1: float, x2: float, y2: float, origin: tuple, specific_part: str = '', return_bbox: bool = False):
+def draw_peel_off(msp, x1: float, y1: float, x2: float, y2: float, origin: tuple, specific_part: str = '', beam_level: str = 'upper', return_bbox: bool = False):
     """绘制剥落图例（原封不动从模板提取）
 
     Args:
         return_bbox: 若为True，返回实际绘制区域的边界框 (ax1, ay1, ax2, ay2)，ay1为上，ay2为下
     """
-    cad_x1, cad_y1 = convert_to_cad_coords(x1, y1, origin, specific_part)
-    cad_x2, cad_y2 = convert_to_cad_coords(x2, y2, origin, specific_part)
+    cad_x1, cad_y1 = convert_to_cad_coords(x1, y1, origin, specific_part, beam_level)
+    cad_x2, cad_y2 = convert_to_cad_coords(x2, y2, origin, specific_part, beam_level)
 
     # 确保 cad_x1 < cad_x2, cad_y2 < cad_y1
     if cad_x1 > cad_x2:
@@ -521,7 +677,7 @@ def draw_peel_off(msp, x1: float, y1: float, x2: float, y2: float, origin: tuple
 
 
 def process_disease_record(msp, record: dict, comp_id: str, beam_level: str):
-    """处理单条病害记录
+    """处理单条病害记录（带防重叠标注）
 
     Args:
         msp: 模型空间
@@ -531,6 +687,8 @@ def process_disease_record(msp, record: dict, comp_id: str, beam_level: str):
                     - pair[0] = 上方T梁 (b-b断面)
                     - pair[1] = 下方T梁 (a-a断面)
     """
+    global LABEL_POSITIONS_CACHE
+    
     specific_part = record.get('具体部件', '梁底')
     disease_type = record.get('病害类型', '')
 
@@ -551,59 +709,74 @@ def process_disease_record(msp, record: dict, comp_id: str, beam_level: str):
     part_type = get_disease_draw_method(specific_part)
     origin = get_part_origin(beam_level, specific_part)
 
-
-
-    # 马蹄左侧面不绘制病害
-    if '马蹄左' in specific_part or '马蹄右' in specific_part:
-        return
-
     # 齿块不绘制病害
     if '齿块' in specific_part:
         return
 
-    cad_x1, cad_y1 = convert_to_cad_coords(x_start, y_start, origin, specific_part)
-    cad_x2, cad_y2 = convert_to_cad_coords(x_end, y_end, origin, specific_part)
+    # 马蹄左侧面/右侧面：只有X坐标，Y坐标固定
+    is_horse_hoof = '马蹄左' in specific_part or '马蹄右' in specific_part
 
+    cad_x1, cad_y1 = convert_to_cad_coords(x_start, y_start, origin, specific_part, beam_level)
+    cad_x2, cad_y2 = convert_to_cad_coords(x_end, y_end, origin, specific_part, beam_level)
+
+    # 马蹄部件：只有X坐标，Y坐标固定，病害区域用固定高度表示
+    if is_horse_hoof:
+        cad_y1 = cad_y1 - 2.5  # 向上扩展2.5
+        cad_y2 = cad_y2 + 2.5  # 向下扩展2.5
+
+    # 病害区域起点（右上角）
     start_x = max(cad_x1, cad_x2)
     start_y = max(cad_y1, cad_y2)
 
+    # 计算第二段长度
     seg2_len = max(12, len(disease_type) * 3 + len(str(area or length)) * 5)
 
-    # 计算如果向右画，标注的右边界x坐标
-    # 折线：起点 -> 折点(45度,8单位) -> 终点(水平,seg2_len)
-    # 向右画时，终点x = 起点x + 8*cos(45) + seg2_len
-    right_boundary_if_go_right = start_x + 8 * math.cos(math.radians(45)) + seg2_len
+    # 获取部件标注方向配置
+    direction_config = PART_LABEL_DIRECTION.get(beam_level, {}).get(specific_part, {'angle': 45, 'flip_angle': 135})
+    base_angle = direction_config['angle']
+    flip_angle = direction_config['flip_angle']
 
-    # 检查右边界是否超过483，如果超过则向左画
-    # 向左画时，终点x = 起点x - 8*cos(45) - seg2_len，需要保证 >= 83
-    go_left = False
-    if right_boundary_if_go_right > 483:
-        left_boundary = start_x - 8 * math.cos(math.radians(45)) - seg2_len
-        if left_boundary >= 83:
-            go_left = True
-        # 否则保持向右画（即使会超出，用户可能需要调整）
+    # 如果起始位置x>450，使用翻转角度（135度）
+    if start_x > 450:
+        base_angle = flip_angle
 
+    # 寻找不重叠的标注位置
+    result = find_non_overlapping_position(start_x, start_y, base_angle, flip_angle, 
+                                           8, seg2_len, beam_level)
+    
+    if result is None:
+        # 找不到合适位置，使用默认角度并记录警告
+        print(f'  警告: 找不到不重叠的标注位置 for {disease_type} at ({start_x:.1f}, {start_y:.1f})')
+        angle = base_angle
+        go_left = (angle > 90 or angle < -90)
+    else:
+        angle, bbox = result
+        go_left = (angle > 90 or angle < -90)
+        # 记录标注位置到缓存
+        LABEL_POSITIONS_CACHE.append(bbox)
+
+    # 绘制病害图形
     if disease_type == '网状裂缝':
-        draw_mesh_crack(msp, x_start, y_start, x_end, y_end, origin, specific_part)
-        draw_disease_label(msp, '网状裂缝', f'S={area:.2f}m²', start_x, start_y, seg2_len, go_left)
+        draw_mesh_crack(msp, x_start, y_start, x_end, y_end, origin, specific_part, beam_level)
+        draw_disease_label_with_angle(msp, '网状裂缝', f'S={area:.2f}m²', start_x, start_y, seg2_len, angle, go_left)
 
     elif disease_type in ['剥落', '剥落掉角', '掉角']:
-        draw_peel_off(msp, x_start, y_start, x_end, y_end, origin, specific_part)
-        draw_disease_label(msp, disease_type, f'S={area:.2f}m²', start_x, start_y, seg2_len, go_left)
+        draw_peel_off(msp, x_start, y_start, x_end, y_end, origin, specific_part, beam_level)
+        draw_disease_label_with_angle(msp, disease_type, f'S={area:.2f}m²', start_x, start_y, seg2_len, angle, go_left)
 
     elif disease_type in ['剥落露筋', '漏筋', '露筋']:
-        draw_peel_off_with_rebar(msp, x_start, y_start, x_end, y_end, origin, specific_part)
-        draw_disease_label(msp, '剥落露筋', f'S={area:.2f}m²', start_x, start_y, seg2_len, go_left)
+        draw_peel_off_with_rebar(msp, x_start, y_start, x_end, y_end, origin, specific_part, beam_level)
+        draw_disease_label_with_angle(msp, '剥落露筋', f'S={area:.2f}m²', start_x, start_y, seg2_len, angle, go_left)
 
     elif '裂缝' in disease_type and count > 0:
-        draw_crack_group(msp, x_start, x_end, count, origin, specific_part)
+        draw_crack_group(msp, x_start, x_end, count, origin, specific_part, beam_level)
         label = f'{disease_type} L总={length:.2f}m N={count}条'
         value = f'间距{spacing:.2f}m' if spacing > 0 else ''
-        draw_disease_label(msp, label, value, start_x, start_y, seg2_len, go_left)
+        draw_disease_label_with_angle(msp, label, value, start_x, start_y, seg2_len, angle, go_left)
 
     elif '裂缝' in disease_type:
         crack_y = (y_start + y_end) / 2
-        draw_crack(msp, x_start, x_end, crack_y, origin, specific_part)
+        draw_crack(msp, x_start, x_end, crack_y, origin, specific_part, beam_level)
         if length > 0 and width > 0:
             label = f'{disease_type} L={length:.2f}m'
             value = f'W={width:.2f}mm'
@@ -613,15 +786,15 @@ def process_disease_record(msp, record: dict, comp_id: str, beam_level: str):
         else:
             label = disease_type
             value = ''
-        draw_disease_label(msp, label, value, start_x, start_y, seg2_len, go_left)
+        draw_disease_label_with_angle(msp, label, value, start_x, start_y, seg2_len, angle, go_left)
 
     elif disease_type in ['蜂窝', '麻面', '水蚀']:
-        draw_peel_off(msp, x_start, y_start, x_end, y_end, origin, specific_part)
-        draw_disease_label(msp, disease_type, f'S={area:.2f}m²', start_x, start_y, seg2_len, go_left)
+        draw_peel_off(msp, x_start, y_start, x_end, y_end, origin, specific_part, beam_level)
+        draw_disease_label_with_angle(msp, disease_type, f'S={area:.2f}m²', start_x, start_y, seg2_len, angle, go_left)
 
     else:
-        draw_peel_off(msp, x_start, y_start, x_end, y_end, origin, specific_part)
-        draw_disease_label(msp, disease_type, '', start_x, start_y, seg2_len, go_left)
+        draw_peel_off(msp, x_start, y_start, x_end, y_end, origin, specific_part, beam_level)
+        draw_disease_label_with_angle(msp, disease_type, '', start_x, start_y, seg2_len, angle, go_left)
 
 
 def delete_text_in_rect(msp, x1: float, y1: float, x2: float, y2: float):
@@ -793,6 +966,8 @@ def main():
 
     for i, pair in enumerate(pairs):
         print(f'\n处理第{i+1}页: {pair}')
+        # 每页开始时重置标注位置缓存
+        reset_label_cache()
         output_path = create_page_for_pair(
             TEMPLATE_FILE, pair, upper_diseases,
             route_name, bridge_name, i + 1
@@ -813,160 +988,256 @@ def main():
     for entity in list(final_msp):
         entity.destroy()
 
-    # 从每页复制内容，Y轴间隔50
+    # 添加桥梁名称标题（字号20，宋体），放在最上方
+    # 标题在最上方，间距100后放置第一张图
+    title_gap = 100  # 标题与第一张图的间距
+    final_msp.add_text(bridge_name, dxfattribs={'height': 20, 'layer': '0'})
+
+    # 从每页复制内容，Y轴向下排列（负Y方向）
+    # 最先处理的放在最上方（偏移最大），依次向下
     page_height = 365  # 图框高度
     gap = 50  # 图与图之间的间距
+    num_pages = len(output_files)
     for i, output_file in enumerate(output_files):
         if os.path.exists(output_file):
             print(f'  复制第{i+1}页...')
-            y_offset = i * (page_height + gap)
+            # 第i页的偏移：最先处理的(i=0)放在最上方，偏移量最大
+            y_offset = -(title_gap + page_height + (num_pages - 1 - i) * (page_height + gap))
 
             page_doc = ezdxf.readfile(output_file)
             page_msp = page_doc.modelspace()
 
+            # 首先复制所有块定义到最终文档
+            copy_blocks_to_doc(page_doc, final_doc)
+
             for entity in page_msp:
                 try:
                     # 复制实体并应用Y偏移
-                    new_entity = copy_entity_with_offset(final_msp, entity, y_offset)
+                    new_entity = copy_entity_with_offset(final_msp, entity, y_offset, final_doc)
                 except Exception as e:
                     print(f'    复制实体失败: {e}')
 
     # 保存最终文件
-    final_output = os.path.join(BASE_DIR, '上部病害_合并结果.dxf')
+    # 获取Excel文件名（不含扩展名）
+    excel_basename = os.path.splitext(os.path.basename(excel_path))[0]
+    final_output = os.path.join(BASE_DIR, f'{excel_basename}-上部病害.dxf')
     final_doc.saveas(final_output)
 
     print(f'\n最终文件已保存: {final_output}')
     print('='*60)
 
 
-def copy_entity_with_offset(msp, entity, y_offset: float):
-    """复制实体并应用Y偏移"""
-    entity_type = entity.dxftype()
+def copy_blocks_to_doc(source_doc, target_doc):
+    """将源文档中的所有块定义复制到目标文档"""
+    for block in source_doc.blocks:
+        block_name = block.name
+        # 检查目标文档是否已存在该块定义
+        if block_name not in target_doc.blocks:
+            try:
+                # 创建新块
+                new_block = target_doc.blocks.new(name=block_name)
+                # 复制块中的所有实体
+                for entity in block:
+                    copy_entity_to_block(new_block, entity)
+            except Exception as e:
+                print(f'    复制块定义 {block_name} 失败: {e}')
 
+
+def copy_entity_to_block(block, entity):
+    """将实体复制到块中 - 使用原生copy方法"""
+    try:
+        # 使用原生copy方法复制实体
+        new_entity = entity.copy()
+        block.add_entity(new_entity)
+    except Exception as e:
+        # 如果原生复制失败，使用手动复制
+        entity_type = entity.dxftype()
+        layer = entity.dxf.layer if hasattr(entity.dxf, 'layer') else '0'
+        color = entity.dxf.color if hasattr(entity.dxf, 'color') else 7
+        
+        try:
+            if entity_type == 'TEXT':
+                text = entity.dxf.text
+                height = entity.dxf.height if hasattr(entity.dxf, 'height') else 2.5
+                insert = entity.dxf.insert
+                block.add_text(text, dxfattribs={'layer': layer, 'color': color, 'height': height}).set_pos(insert)
+            elif entity_type == 'MTEXT':
+                mtxt = block.add_mtext(entity.text, dxfattribs={'layer': layer, 'color': color})
+                mtxt.dxf.insert = entity.dxf.insert
+                if hasattr(entity.dxf, 'char_height'):
+                    mtxt.dxf.char_height = entity.dxf.char_height
+            elif entity_type == 'LINE':
+                block.add_line(entity.dxf.start, entity.dxf.end, dxfattribs={'layer': layer, 'color': color})
+            elif entity_type == 'LWPOLYLINE':
+                if hasattr(entity, 'get_points'):
+                    points = [(p[0], p[1]) for p in entity.get_points()]
+                    block.add_lwpolyline(points, dxfattribs={'layer': layer, 'color': color})
+            elif entity_type == 'CIRCLE':
+                block.add_circle(entity.dxf.center, entity.dxf.radius, dxfattribs={'layer': layer, 'color': color})
+            elif entity_type == 'ARC':
+                block.add_arc(entity.dxf.center, entity.dxf.radius, entity.dxf.start_angle, entity.dxf.end_angle,
+                             dxfattribs={'layer': layer, 'color': color})
+            elif entity_type == 'SPLINE':
+                from ezdxf.math import BSpline
+                if hasattr(entity, 'control_points') and entity.control_points:
+                    control_points = [(pt[0], pt[1], 0) for pt in entity.control_points]
+                    spline = BSpline(control_points)
+                    block.add_spline(spline, dxfattribs={'layer': layer, 'color': color})
+            elif entity_type == 'HATCH':
+                hatch = block.add_hatch(color=color, dxfattribs={'layer': layer})
+                for path in entity.paths:
+                    if hasattr(path, 'vertices'):
+                        hatch.paths.add_polyline_path([(v[0], v[1]) for v in path.vertices])
+                if hasattr(entity.dxf, 'pattern_name'):
+                    try:
+                        hatch.set_pattern_fill(entity.dxf.pattern_name)
+                    except:
+                        pass
+            elif entity_type == 'POINT':
+                block.add_point(entity.dxf.location, dxfattribs={'layer': layer, 'color': color})
+        except:
+            pass
+
+
+def copy_entity_with_offset(msp, entity, y_offset: float, target_doc=None):
+    """复制实体并应用Y偏移 - 使用ezdxf原生copy方法"""
+    entity_type = entity.dxftype()
+    
+    try:
+        # 对于大多数实体类型，使用原生copy和translate
+        if entity_type in ('TEXT', 'MTEXT', 'LINE', 'LWPOLYLINE', 'POLYLINE', 
+                          'SPLINE', 'CIRCLE', 'ARC', 'POINT', 'HATCH', 'ELLIPSE'):
+            new_entity = entity.copy()
+            new_entity.translate(0, y_offset, 0)
+            msp.add_entity(new_entity)
+            return new_entity
+            
+        elif entity_type == 'INSERT':
+            # INSERT - 块引用需要特殊处理
+            block_name = entity.dxf.name
+            old_x, old_y = entity.dxf.insert[0], entity.dxf.insert[1]
+            new_pos = (old_x, old_y + y_offset)
+            x_scale = entity.dxf.xscale if hasattr(entity.dxf, 'xscale') else 1
+            y_scale = entity.dxf.yscale if hasattr(entity.dxf, 'yscale') else 1
+            z_scale = entity.dxf.zscale if hasattr(entity.dxf, 'zscale') else 1
+            rotation = entity.dxf.rotation if hasattr(entity.dxf, 'rotation') else 0
+            layer = entity.dxf.layer if hasattr(entity.dxf, 'layer') else '0'
+            
+            # 检查块定义是否存在
+            if target_doc and block_name not in target_doc.blocks:
+                print(f'    警告: 块定义 {block_name} 不存在，跳过此块引用')
+                return None
+                
+            return msp.add_blockref(block_name, new_pos, dxfattribs={
+                'layer': layer, 
+                'xscale': x_scale, 
+                'yscale': y_scale, 
+                'zscale': z_scale, 
+                'rotation': rotation
+            })
+        else:
+            # 其他类型尝试原生复制
+            new_entity = entity.copy()
+            new_entity.translate(0, y_offset, 0)
+            msp.add_entity(new_entity)
+            return new_entity
+            
+    except Exception as e:
+        # 如果原生复制失败，使用手动复制
+        return copy_entity_manual(msp, entity, y_offset, target_doc)
+
+
+def copy_entity_manual(msp, entity, y_offset: float, target_doc=None):
+    """手动复制实体（备用方法）"""
+    entity_type = entity.dxftype()
     layer = entity.dxf.layer if hasattr(entity.dxf, 'layer') else '0'
     color = entity.dxf.color if hasattr(entity.dxf, 'color') else 7
 
-    if entity_type == 'TEXT':
-        text = entity.dxf.text
-        height = entity.dxf.height if hasattr(entity.dxf, 'height') else 2.5
-        bold = entity.dxf.bold if hasattr(entity.dxf, 'bold') else False
-        old_x, old_y = entity.dxf.insert[0], entity.dxf.insert[1]
-        new_pos = (old_x, old_y + y_offset)
-        text_obj = msp.add_text(text, dxfattribs={'layer': layer, 'color': color, 'height': height})
-        text_obj.dxf.insert = new_pos
-        if bold:
-            text_obj.dxf.bold = bold
-        return text_obj
+    try:
+        if entity_type == 'TEXT':
+            text = entity.dxf.text
+            height = entity.dxf.height if hasattr(entity.dxf, 'height') else 2.5
+            old_x, old_y = entity.dxf.insert[0], entity.dxf.insert[1]
+            new_pos = (old_x, old_y + y_offset)
+            text_obj = msp.add_text(text, dxfattribs={'layer': layer, 'color': color, 'height': height})
+            text_obj.dxf.insert = new_pos
+            return text_obj
 
-    elif entity_type == 'MTEXT':
-        # MTEXT - 直接使用原生拷贝
-        old_x, old_y = entity.dxf.insert[0], entity.dxf.insert[1]
-        new_pos = (old_x, old_y + y_offset)
-        mtxt = msp.add_mtext(entity.text, dxfattribs={'layer': layer})
-        mtxt.dxf.insert = new_pos
-        if hasattr(entity.dxf, 'char_height'):
-            mtxt.dxf.char_height = entity.dxf.char_height
-        if hasattr(entity.dxf, 'width'):
-            mtxt.dxf.width = entity.dxf.width
-        if hasattr(entity.dxf, 'height'):
-            mtxt.dxf.height = entity.dxf.height
-        if hasattr(entity.dxf, 'style'):
-            mtxt.dxf.style = entity.dxf.style
-        if hasattr(entity.dxf, 'color'):
-            mtxt.dxf.color = entity.dxf.color
-        # 设置MTEXT的段落宽度（控制换行）
-        if hasattr(entity.dxf, 'rect_width'):
-            mtxt.dxf.rect_width = entity.dxf.rect_width
-        elif hasattr(entity, 'rect_width'):
-            mtxt.dxf.rect_width = entity.rect_width
-        return mtxt
+        elif entity_type == 'MTEXT':
+            old_x, old_y = entity.dxf.insert[0], entity.dxf.insert[1]
+            new_pos = (old_x, old_y + y_offset)
+            mtxt = msp.add_mtext(entity.text, dxfattribs={'layer': layer})
+            mtxt.dxf.insert = new_pos
+            if hasattr(entity.dxf, 'char_height'):
+                mtxt.dxf.char_height = entity.dxf.char_height
+            return mtxt
 
-    elif entity_type == 'LINE':
-        start = entity.dxf.start
-        end = entity.dxf.end
-        new_start = (start[0], start[1] + y_offset)
-        new_end = (end[0], end[1] + y_offset)
-        return msp.add_line(new_start, new_end, dxfattribs={'layer': layer, 'color': color})
+        elif entity_type == 'LINE':
+            start = entity.dxf.start
+            end = entity.dxf.end
+            new_start = (start[0], start[1] + y_offset)
+            new_end = (end[0], end[1] + y_offset)
+            return msp.add_line(new_start, new_end, dxfattribs={'layer': layer, 'color': color})
 
-    elif entity_type == 'LWPOLYLINE':
-        points = []
-        if hasattr(entity, 'get_points'):
-            for pt in entity.get_points():
-                points.append((pt[0], pt[1] + y_offset))
-        if points:
-            return msp.add_lwpolyline(points, dxfattribs={'layer': layer, 'color': color})
-        return None
+        elif entity_type == 'LWPOLYLINE':
+            points = []
+            if hasattr(entity, 'get_points'):
+                for pt in entity.get_points():
+                    points.append((pt[0], pt[1] + y_offset))
+            if points:
+                return msp.add_lwpolyline(points, dxfattribs={'layer': layer, 'color': color})
+            return None
 
-    elif entity_type == 'POLYLINE':
-        points = []
-        if hasattr(entity, 'points'):
-            for pt in entity.points:
-                points.append((pt[0], pt[1] + y_offset))
-        if points:
-            return msp.add_polyline2d(points, dxfattribs={'layer': layer, 'color': color})
-        return None
-
-    elif entity_type == 'SPLINE':
-        # SPLINE - 使用正确的ezdxf API
-        try:
+        elif entity_type == 'SPLINE':
             from ezdxf.math import BSpline
             if hasattr(entity, 'control_points') and entity.control_points:
                 control_points = [(pt[0], pt[1] + y_offset, 0) for pt in entity.control_points]
                 spline = BSpline(control_points)
                 return msp.add_spline(spline, dxfattribs={'layer': layer, 'color': color})
-        except Exception as e:
-            pass
-        return None
-
-    elif entity_type == 'HATCH':
-        # HATCH - 尝试复制
-        try:
-            hatch = msp.add_hatch(entity.dxf.pattern_name, dxfattribs={'layer': layer})
-            # 复制边界路径
-            for path in entity.paths:
-                if path.has_outer_path:
-                    # 获取边界点
-                    if hasattr(path, 'get_outer_points'):
-                        outer_pts = path.get_outer_points()
-                        if outer_pts:
-                            # 添加边界
-                            pass
-            return hatch
-        except:
             return None
 
-    elif entity_type == 'INSERT':
-        # INSERT - 块引用
-        block_name = entity.dxf.name
-        old_x, old_y = entity.dxf.insert[0], entity.dxf.insert[1]
-        new_pos = (old_x, old_y + y_offset)
-        x_scale = entity.dxf.xscale if hasattr(entity.dxf, 'xscale') else 1
-        y_scale = entity.dxf.yscale if hasattr(entity.dxf, 'yscale') else 1
-        z_scale = entity.dxf.zscale if hasattr(entity.dxf, 'zscale') else 1
-        rotation = entity.dxf.rotation if hasattr(entity.dxf, 'rotation') else 0
-        return msp.add_blockref(block_name, new_pos, dxfattribs={'layer': layer, 'xscale': x_scale, 'yscale': y_scale, 'zscale': z_scale, 'rotation': rotation})
+        elif entity_type == 'HATCH':
+            # HATCH使用原生复制
+            new_hatch = entity.copy()
+            new_hatch.translate(0, y_offset, 0)
+            msp.add_entity(new_hatch)
+            return new_hatch
 
-    elif entity_type == 'CIRCLE':
-        center = entity.dxf.center
-        radius = entity.dxf.radius
-        new_center = (center[0], center[1] + y_offset)
-        return msp.add_circle(new_center, radius, dxfattribs={'layer': layer, 'color': color})
+        elif entity_type == 'INSERT':
+            block_name = entity.dxf.name
+            old_x, old_y = entity.dxf.insert[0], entity.dxf.insert[1]
+            new_pos = (old_x, old_y + y_offset)
+            x_scale = entity.dxf.xscale if hasattr(entity.dxf, 'xscale') else 1
+            y_scale = entity.dxf.yscale if hasattr(entity.dxf, 'yscale') else 1
+            rotation = entity.dxf.rotation if hasattr(entity.dxf, 'rotation') else 0
+            
+            if target_doc and block_name not in target_doc.blocks:
+                return None
+                
+            return msp.add_blockref(block_name, new_pos, dxfattribs={
+                'layer': layer, 
+                'xscale': x_scale, 
+                'yscale': y_scale, 
+                'rotation': rotation
+            })
 
-    elif entity_type == 'ARC':
-        center = entity.dxf.center
-        radius = entity.dxf.radius
-        start_angle = entity.dxf.start_angle
-        end_angle = entity.dxf.end_angle
-        new_center = (center[0], center[1] + y_offset)
-        return msp.add_arc(new_center, radius, start_angle, end_angle, dxfattribs={'layer': layer, 'color': color})
+        elif entity_type == 'CIRCLE':
+            center = entity.dxf.center
+            radius = entity.dxf.radius
+            new_center = (center[0], center[1] + y_offset)
+            return msp.add_circle(new_center, radius, dxfattribs={'layer': layer, 'color': color})
 
-    elif entity_type == 'POINT':
-        location = entity.dxf.location
-        new_location = (location[0], location[1] + y_offset)
-        return msp.add_point(new_location, dxfattribs={'layer': layer, 'color': color})
+        elif entity_type == 'ARC':
+            center = entity.dxf.center
+            radius = entity.dxf.radius
+            start_angle = entity.dxf.start_angle
+            end_angle = entity.dxf.end_angle
+            new_center = (center[0], center[1] + y_offset)
+            return msp.add_arc(new_center, radius, start_angle, end_angle, dxfattribs={'layer': layer, 'color': color})
 
-    else:
-        # 尝试通用复制
+        else:
+            return None
+    except Exception as e:
         return None
 
 

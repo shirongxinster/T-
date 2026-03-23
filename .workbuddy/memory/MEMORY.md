@@ -300,3 +300,107 @@ def update_text_in_msp(msp, old_text: str, new_text: str):
 - 关键：剥落图形用 `min(scale_x, scale_y)` 保持比例，实际区域比传入矩形小；格栅范围必须用实际 bbox 而非原始矩形，否则线会露出图形外
 - `draw_peel_off()` 增加 `return_bbox` 参数，返回 (ax1, ay1, ax2, ay2)
 - 注意：`load_rebar_geometry()` 函数保留但不再使用
+
+## 2026-03-22 蜂窝麻面图例修复
+**问题**：蜂窝麻面图例中的蓝白点（DOTS pattern）没有正确显示
+**原因**：之前代码使用`add_hatch`创建新HATCH时，ezdxf将DOTS pattern转为SOLID
+
+**解决方案**：使用`entity.copy()`和`Matrix44.transform()`复制原始HATCH实体
+```python
+new_entity = entity.copy()
+transform = Matrix44.scale(scale, scale, 1) @ Matrix44.translate(offset_x, offset_y, 0)
+new_entity.transform(transform)
+msp.add_entity(new_entity)
+```
+- 关键：必须用`copy()`方法保留原始HATCH的DOTS pattern属性
+- 不能再用`add_hatch()`创建新实体，那样会丢失pattern
+
+**文件**：`bridge_disease_main_lower.py` 的 `draw_honeycomb()` 函数
+
+## T梁原点坐标（2026-03-23 更新）
+
+### 上方T梁（1-1号，奇数梁）
+| 部件 | 原点坐标 (X, Y) | Y方向 |
+|------|-----------------|-------|
+| 梁底 | (84, 262) | 从上到下 |
+| 左翼缘板 | (84, 284.4) | 从下到上 |
+| 右翼缘板 | (84, 234.4) | 从上到下 |
+| 左腹板 | (84, 284.4) | 从上到下 |
+| 右腹板 | (84, 234.4) | 从下到上 |
+
+### 下方T梁（1-2号，偶数梁）
+| 部件 | 原点坐标 (X, Y) | Y方向 |
+|------|-----------------|-------|
+| 梁底 | (83.8, 150) | 从上到下 |
+| 左翼缘板 | (83.8, 172) | 从下到上 |
+| 右翼缘板 | (83.8, 122) | 从上到下 |
+| 左腹板 | (83.8, 172) | 从上到下 |
+| 右腹板 | (83.8, 122) | 从下到上 |
+
+### 坐标转换规则
+- X方向：统一从左到右，`CAD_X = origin_X + x * 10`
+- Y方向：根据部件Y方向决定
+  - `从上到下`：`CAD_Y = origin_Y - y * 10`（Y值减小）
+  - `从下到上`：`CAD_Y = origin_Y + y * 10`（Y值增大）
+
+## 蜂窝麻面平铺逻辑（2026-03-23 最终确认）✅
+- **图例文件**：`templates/病害图例/蜂窝麻面.dxf`，extmin≈(0.1, -0.14)，原始尺寸≈4.6×3.3
+- **缩放**：scale=2.0（放大2倍），scaled_w≈9.2，scaled_h≈6.7（不放大看不出蜂窝）
+- **变换矩阵**（直接构造，不用矩阵链）：
+  - `dx = tile_x - src_min_x * scale`
+  - `dy = tile_y - src_min_y * scale`
+  - `transform = Matrix44([scale,0,0,0, 0,scale,0,0, 0,0,1,0, dx,dy,0,1])`
+  - 等价于 p_new = p * scale + (tile - src_min * scale)
+- **对齐**：图例左上角（src_min_x, src_min_y）对齐矩形左上角（cad_x1, cad_y1）
+  - start_x=cad_x1（矩形左边界），start_y=cad_y1（矩形上边界，Y较小）
+  - tile_y = cad_y1 + row * scaled_h（向下增加）
+- **平铺数量**：用 floor（不超出边界），`n_cols=floor(dst_w/scaled_w)`，`n_rows=floor(dst_h/scaled_h)`
+- **不超出矩形**：每个方向只画完整格子，宁可留白也不超边
+- **标注**：折线引线（45度+水平线）+ 上方病害名 + 下方面积 S=xx m²
+
+## 2026-03-22 更新
+
+### 单独构件页面删除范围修正
+**删除范围**: `(28, 217)` 到 `(503, 78)` 矩形区域
+- 删除 b-b 文字及下方T梁区域（横向标尺、纵向标尺）
+
+### 病害过滤
+- **泛白**：不绘制图例也不显示标注（直接跳过）
+
+### 标题文字字号调整
+- 路线名称、桥梁名称、孔次：字号 6
+- 梁号：字号 6.5
+
+### 合并文件修复（copy_entity_with_offset函数）
+**问题**：合并时丢失了MTEXT、SPLINE、HATCH、INSERT等实体
+
+**修复**：添加了以下实体类型的复制支持：
+- MTEXT：保留 text、char_height、rect_width、style、color
+- SPLINE：使用 ezdxf.math.BSpline 重建
+- HATCH：基础填充复制
+- INSERT：块引用，保留 xscale、yscale、zscale、rotation
+
+### 合并图页偏移修正
+- 图框高度：365
+- 图与图间距：50
+- 每页偏移：`(365 + 50) * 页序号`
+
+## 下部墩柱病害处理（2026-03-23）
+
+### 墩柱病害绘制规则（用户确认）
+- **不关注x/y坐标**：直接在墩柱矩形范围内绘制
+- **病害区域**：墩柱矩形中间偏上区域，留边距
+  - X方向：左右各留4 CAD单位边距
+  - Y方向：取墩柱高度25%~65%的区域（偏上）
+
+### 墩柱识别
+- `墩柱号` + `柱内编号` 组合成键如 `"4-1号"` → `N-{柱内编号}`
+- `location='墩柱'` 默认归类为小桩号面
+- 配对逻辑：墩柱号 `"n-m号"` 的主编号 `n` 与盖梁号 `n` 匹配
+
+### 墩柱病害样式
+- **露筋** = 钢筋锈蚀或可见箍筋轮廓图例（平铺），使用 `templates/病害图例/钢筋锈蚀或可见箍筋轮廓.dxf`
+- **剥落/破损** = 剥落不规则图形
+- **蜂窝/麻面** = 圆点填充
+- **裂缝** = 水平线 + 标注
+
