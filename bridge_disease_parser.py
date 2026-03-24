@@ -430,7 +430,7 @@ def parse_disease_position(disease_desc: str) -> Dict[str, Any]:
         disease_types = ['纵向裂缝', '竖向裂缝', '横向裂缝', '水平裂缝', '网状裂缝',
                         '剥落露筋', '漏筋', '锈胀露筋', '露筋',
                         '剥落掉角', '剥落', '掉角', '水蚀',
-                        '蜂窝', '麻面', '泛白', '破损', '孔洞空洞']
+                        '蜂窝、麻面', '麻面、蜂窝', '蜂窝', '麻面', '泛白', '破损', '孔洞空洞']
         for dt in disease_types:
             if dt in part:
                 result['disease_type'] = dt
