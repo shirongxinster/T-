@@ -17,6 +17,7 @@ random.seed(42)
 
 # 路径配置
 BASE_DIR = r"k:\works\008.S2ReportAndLayoutPic\leftRealJobs_workbuddy"
+INPUT_DIR = os.path.join(BASE_DIR, "input")
 TEMPLATES_DIR = os.path.join(BASE_DIR, "templates", "构件")
 LEGENDS_DIR = os.path.join(BASE_DIR, "templates", "病害图例")
 OUTPUT_DIR = os.path.join(BASE_DIR, "output_pages")
@@ -1970,6 +1971,7 @@ def create_page_for_pair(
     disease_data: dict,
     route_name: str,
     bridge_name: str,
+    bridge_output_dir: str,
     page_index: int,
 ) -> str:
     """为一对构件创建一页病害图"""
@@ -2043,7 +2045,7 @@ def create_page_for_pair(
     # 保存 - 文件名格式：上部T梁第N页_构件号.dxf
     comp_ids_str = "-".join([c.replace("号", "") for c in pair])  # 如 "1-1-1-2"
     output_path = os.path.join(
-        OUTPUT_DIR, f"上部T梁第{page_index}页_{comp_ids_str}.dxf"
+        bridge_output_dir, f"上部T梁第{page_index}页_{comp_ids_str}.dxf"
     )
     doc.saveas(output_path)
     print(f"  已保存: {output_path}")
@@ -2052,104 +2054,143 @@ def create_page_for_pair(
 
 
 def main():
-    """主函数"""
+    """主函数：处理input目录中的所有Excel文件"""
     print("=" * 60)
     print("桥梁病害CAD标注系统 - 上部（40mT梁）处理")
+    print("支持批量处理input目录中的所有Excel文件")
     print("=" * 60)
 
     # 确保输出目录存在
     os.makedirs(OUTPUT_DIR, exist_ok=True)
 
-    # 解析Excel数据
-    excel_path = os.path.join(BASE_DIR, "K572+774红石牡丹江大桥（右幅）病害.xls")
-    print(f"\n读取Excel文件: {excel_path}")
-    data = parse_excel(excel_path)
+    # 获取input目录中的所有Excel文件
+    excel_files = []
+    if os.path.exists(INPUT_DIR):
+        for filename in os.listdir(INPUT_DIR):
+            if filename.endswith('.xls') or filename.endswith('.xlsx'):
+                excel_files.append(os.path.join(INPUT_DIR, filename))
+    
+    if not excel_files:
+        print(f"\n错误：未在 {INPUT_DIR} 目录中找到Excel文件！")
+        return
+    
+    print(f"\n发现 {len(excel_files)} 个Excel文件:")
+    for i, f in enumerate(excel_files, 1):
+        print(f"  {i}. {os.path.basename(f)}")
 
-    route_name = data["route_name"]
-    bridge_name = data["bridge_name"]
+    # 处理每个Excel文件
+    for excel_idx, excel_path in enumerate(excel_files, 1):
+        print("\n" + "=" * 60)
+        print(f"[{excel_idx}/{len(excel_files)}] 处理: {os.path.basename(excel_path)}")
+        print("=" * 60)
 
-    print(f"路线名称: {route_name}")
-    print(f"桥梁名称: {bridge_name}")
+        # 解析Excel数据
+        print(f"\n读取Excel文件: {excel_path}")
+        try:
+            data = parse_excel(excel_path)
+        except Exception as e:
+            print(f"  解析失败: {e}")
+            continue
 
-    # 获取上部（40mT梁）的病害数据
-    upper_diseases = {}
-    for part in data["parts"]:
-        if "上部" in part["name"]:
-            for comp_id, records in part["grouped_data"].items():
-                upper_diseases[comp_id] = records
+        route_name = data["route_name"]
+        bridge_name = data["bridge_name"]
 
-    print(f"\n上部（40mT梁）构件数量: {len(upper_diseases)}")
-    print(f"构件列表: {list(upper_diseases.keys())}")
+        print(f"路线名称: {route_name}")
+        print(f"桥梁名称: {bridge_name}")
+        
+        # 创建桥梁子目录，避免文件混淆
+        bridge_output_dir = os.path.join(OUTPUT_DIR, bridge_name)
+        os.makedirs(bridge_output_dir, exist_ok=True)
+        print(f"输出目录: {bridge_output_dir}")
 
-    # 配对构件
-    components = list(upper_diseases.keys())
-    pairs = pair_components(components)
-    print(f"\n配对结果: {len(pairs)} 页")
-    for i, pair in enumerate(pairs):
-        print(f"  第{i + 1}页: {pair}")
+        # 获取上部（40mT梁）的病害数据
+        upper_diseases = {}
+        for part in data["parts"]:
+            if "上部" in part["name"]:
+                for comp_id, records in part["grouped_data"].items():
+                    upper_diseases[comp_id] = records
 
-    # 为每对构件创建一页
-    output_files = []
+        if not upper_diseases:
+            print("  未找到上部病害数据，跳过")
+            continue
 
-    for i, pair in enumerate(pairs):
-        print(f"\n处理第{i + 1}页: {pair}")
-        # 每页开始时重置标注位置缓存
-        reset_label_cache()
-        output_path = create_page_for_pair(
-            TEMPLATE_FILE, pair, upper_diseases, route_name, bridge_name, i + 1
-        )
-        output_files.append(output_path)
+        print(f"\n上部（40mT梁）构件数量: {len(upper_diseases)}")
+        print(f"构件列表: {list(upper_diseases.keys())}")
 
-    # 创建最终合并文件
+        # 配对构件
+        components = list(upper_diseases.keys())
+        pairs = pair_components(components)
+        print(f"\n配对结果: {len(pairs)} 页")
+        for i, pair in enumerate(pairs):
+            print(f"  第{i + 1}页: {pair}")
+
+        # 为每对构件创建一页
+        output_files = []
+
+        for i, pair in enumerate(pairs):
+            print(f"\n处理第{i + 1}页: {pair}")
+            # 每页开始时重置标注位置缓存
+            reset_label_cache()
+            output_path = create_page_for_pair(
+                TEMPLATE_FILE, pair, upper_diseases, route_name, bridge_name, bridge_output_dir, i + 1
+            )
+            output_files.append(output_path)
+
+        # 创建最终合并文件
+        print("\n" + "=" * 60)
+        print("创建最终合并文件...")
+
+        import ezdxf
+
+        # 读取第一个模板作为基础
+        final_doc = ezdxf.readfile(TEMPLATE_FILE)
+        final_msp = final_doc.modelspace()
+
+        # 清空模型空间（重新绘制）
+        for entity in list(final_msp):
+            entity.destroy()
+
+        # 添加桥梁名称标题（字号20，宋体），放在最上方
+        # 标题在最上方，间距100后放置第一张图
+        title_gap = 100  # 标题与第一张图的间距
+        final_msp.add_text(bridge_name, dxfattribs={"height": 20, "layer": "0"})
+
+        # 从每页复制内容，Y轴向下排列（负Y方向）
+        # 最先处理的放在最上方，依次向下
+        page_height = 365  # 图框高度
+        gap = 50  # 图与图之间的间距
+        num_pages = len(output_files)
+        for i, output_file in enumerate(output_files):
+            if os.path.exists(output_file):
+                print(f"  复制第{i + 1}页...")
+                # 第i页的偏移：最先处理的(i=0)放在最上方，偏移量最小
+                y_offset = -(title_gap + page_height + i * (page_height + gap))
+
+                page_doc = ezdxf.readfile(output_file)
+                page_msp = page_doc.modelspace()
+
+                # 首先复制所有块定义到最终文档
+                copy_blocks_to_doc(page_doc, final_doc)
+
+                for entity in page_msp:
+                    try:
+                        # 复制实体并应用Y偏移
+                        new_entity = copy_entity_with_offset(
+                            final_msp, entity, y_offset, final_doc
+                        )
+                    except Exception as e:
+                        print(f"    复制实体失败: {e}")
+
+        # 保存最终文件
+        # 获取Excel文件名（不含扩展名）
+        excel_basename = os.path.splitext(os.path.basename(excel_path))[0]
+        final_output = os.path.join(BASE_DIR, f"{excel_basename}-上部病害.dxf")
+        final_doc.saveas(final_output)
+        print(f"\n最终文件已保存: {final_output}")
+
     print("\n" + "=" * 60)
-    print("创建最终合并文件...")
-
-    import ezdxf
-
-    # 读取第一个模板作为基础
-    final_doc = ezdxf.readfile(TEMPLATE_FILE)
-    final_msp = final_doc.modelspace()
-
-    # 清空模型空间（重新绘制）
-    for entity in list(final_msp):
-        entity.destroy()
-
-    # 添加桥梁名称标题（字号20，宋体），放在最上方
-    # 标题在最上方，间距100后放置第一张图
-    title_gap = 100  # 标题与第一张图的间距
-    final_msp.add_text(bridge_name, dxfattribs={"height": 20, "layer": "0"})
-
-    # 从每页复制内容，Y轴向下排列（负Y方向）
-    # 最先处理的放在最上方，依次向下
-    page_height = 365  # 图框高度
-    gap = 50  # 图与图之间的间距
-    num_pages = len(output_files)
-    for i, output_file in enumerate(output_files):
-        if os.path.exists(output_file):
-            print(f"  复制第{i + 1}页...")
-            # 第i页的偏移：最先处理的(i=0)放在最上方，偏移量最小
-            y_offset = -(title_gap + page_height + i * (page_height + gap))
-
-            page_doc = ezdxf.readfile(output_file)
-            page_msp = page_doc.modelspace()
-
-            # 首先复制所有块定义到最终文档
-            copy_blocks_to_doc(page_doc, final_doc)
-
-            for entity in page_msp:
-                try:
-                    # 复制实体并应用Y偏移
-                    new_entity = copy_entity_with_offset(
-                        final_msp, entity, y_offset, final_doc
-                    )
-                except Exception as e:
-                    print(f"    复制实体失败: {e}")
-
-    # 保存最终文件
-    # 获取Excel文件名（不含扩展名）
-    excel_basename = os.path.splitext(os.path.basename(excel_path))[0]
-    final_output = os.path.join(BASE_DIR, f"{excel_basename}-上部病害.dxf")
-    final_doc.saveas(final_output)
+    print("所有Excel文件处理完成！")
+    print("=" * 60)
 
     print(f"\n最终文件已保存: {final_output}")
     print("=" * 60)

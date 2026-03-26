@@ -5,6 +5,7 @@
 """
 
 import pandas as pd
+import re
 from collections import defaultdict
 from typing import Dict, List, Any
 
@@ -22,17 +23,48 @@ def parse_excel(excel_path: str) -> Dict[str, Any]:
     df = pd.read_excel(excel_path, header=None)
     
     # 提取桥梁基本信息
-    route_name = df.iloc[0, 0].replace('路线名称:', '').strip()
-    bridge_name = df.iloc[1, 0].replace('桥梁名称：', '').strip()
+    # 处理可能的空值（NaN）情况
+    route_name_raw = df.iloc[0, 0]
+    bridge_name_raw = df.iloc[1, 0]
+    
+    # 确保转换为字符串，处理NaN
+    route_name = str(route_name_raw).replace('路线名称:', '').strip() if pd.notna(route_name_raw) else ''
+    
+    # 第二行可能是桥梁名称（新格式）或带前缀的桥梁名称（旧格式）
+    if pd.notna(bridge_name_raw):
+        bridge_name_str = str(bridge_name_raw)
+        if '桥梁名称' in bridge_name_str:
+            # 旧格式："桥梁名称：K575+266黄泥河大桥（右幅）"
+            bridge_name = bridge_name_str.replace('桥梁名称：', '').strip()
+        else:
+            # 新格式：直接是桥梁名称"K575+266黄泥河大桥（右幅）"
+            bridge_name = bridge_name_str.strip()
+    else:
+        bridge_name = ''
+    
+    # 如果没有提取到桥梁名称，尝试从第一行提取
+    if not bridge_name and pd.notna(route_name_raw):
+        first_line = str(route_name_raw)
+        # 格式如："一、K575+266黄泥河大桥（右幅）"
+        if '、' in first_line:
+            bridge_name = first_line.split('、', 1)[1].strip()
+        else:
+            bridge_name = first_line.strip()
     
     # 找到所有构件类型的起止位置
     # 方法：先找到所有构件类型标题行，然后计算每个构件的数据范围
     part_titles = []  # [(行号, 构件名称), ...]
     for i in range(len(df)):
         cell = df.iloc[i, 0]
-        if pd.notna(cell) and '（' in str(cell) and '）' in str(cell):
-            part_name = str(cell).strip()
+        cell_str = str(cell)
+        # 支持全角括号（）和半角括号()
+        if pd.notna(cell) and (('（' in cell_str and '）' in cell_str) or ('(' in cell_str and ')' in cell_str)):
+            part_name = cell_str.strip()
+            # 跳过桥梁基本信息行（包含"桥梁名称"）
             if '桥梁名称' in part_name:
+                continue
+            # 跳过看起来像标题序号的行（如"一、..."、"二、..."等）
+            if re.match(r'^[一二三四五六七八九十]+、', part_name):
                 continue
             part_titles.append((i, part_name))
     
@@ -280,7 +312,9 @@ def get_template_name(part_name: str) -> str:
     """
     mapping = {
         '上部（40mT梁）': '40mT梁.dxf',
+        '上部(40mT梁)': '40mT梁.dxf',
         '下部（双柱墩）': '双柱墩12.5.dxf',
+        '下部（双柱墩12.5m）': '双柱墩12.5.dxf',
         '下部（单柱墩）': '单柱墩.dxf',
         '桥台（不带台身桥台）': '不带台身桥台.dxf',
         '桥台（带台身桥台）': '带台身桥台.dxf'
@@ -298,8 +332,9 @@ def get_legend_name(disease_desc: str) -> str:
     Returns:
         图例文件名
     """
-    if '泛白' in disease_desc:
-        return None  # 泛白不需要处理
+    # 纯泛白不需要处理，但泛白+裂缝需要处理裂缝
+    if disease_desc.strip() == '泛白' or disease_desc.endswith('泛白'):
+        return None  # 纯泛白不需要处理
     
     if '马蹄' in disease_desc:
         return None  # 马蹄的病害不处理
@@ -309,7 +344,9 @@ def get_legend_name(disease_desc: str) -> str:
         '竖向裂缝': '裂缝及其长宽.dxf',
         '横向裂缝': '裂缝及其长宽.dxf',
         '水平裂缝': '裂缝及其长宽.dxf',
+        '斜向裂缝': '裂缝及其长宽.dxf',
         '网状裂缝': '网状裂缝.dxf',
+        '开裂': '裂缝及其长宽.dxf',
         '剥落掉角': '剥落、掉角.dxf',
         '掉角': '剥落、掉角.dxf',
         '剥落': '剥落、掉角.dxf',
@@ -363,11 +400,17 @@ def parse_disease_position(disease_desc: str) -> Dict[str, Any]:
     # 解析坐标
     import re
     for part in parts:
-        # x坐标
-        x_match = re.search(r'x=([\d.]+)～([\d.]+)m', part)
-        if x_match:
-            result['x_start'] = float(x_match.group(1))
-            result['x_end'] = float(x_match.group(2))
+        # x坐标范围
+        x_range_match = re.search(r'x=([\d.]+)～([\d.]+)m', part)
+        if x_range_match:
+            result['x_start'] = float(x_range_match.group(1))
+            result['x_end'] = float(x_range_match.group(2))
+        
+        # 只有x坐标（无范围）— 前面必须是边界（行首、逗号、空格、y等）
+        x_single_match = re.search(r'(?:^|[,，\s])x=([\d.]+)m(?:[,，]|$|\s)', part)
+        if x_single_match and not x_range_match:
+            result['x_start'] = float(x_single_match.group(1))
+            result['x_end'] = float(x_single_match.group(1))
         
         # 只有y坐标（无范围）— 末尾逗号可选
         y_match = re.search(r'y=([\d.]+)m(?:[,，]|$|\s)', part)
@@ -427,10 +470,12 @@ def parse_disease_position(disease_desc: str) -> Dict[str, Any]:
             result['spacing'] = float(spacing_match.group(1))
         
         # 病害类型（注意：更长/更具体的关键词必须排在前面，避免被短词提前匹配）
-        disease_types = ['纵向裂缝', '竖向裂缝', '横向裂缝', '水平裂缝', '网状裂缝',
+        disease_types = ['纵向裂缝', '竖向裂缝', '横向裂缝', '水平裂缝', '斜向裂缝', '网状裂缝',
                         '剥落露筋', '漏筋', '锈胀露筋', '露筋',
                         '剥落掉角', '剥落', '掉角', '水蚀',
-                        '蜂窝、麻面', '麻面、蜂窝', '蜂窝', '麻面', '泛白', '破损', '孔洞空洞']
+                        '蜂窝、麻面', '麻面、蜂窝', '蜂窝', '麻面', '泛白吸附', '泛白', '破损', 
+                        '空洞、孔洞', '孔洞空洞', '空洞', '孔洞',
+                        '开裂']
         for dt in disease_types:
             if dt in part:
                 result['disease_type'] = dt
